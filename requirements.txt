@@ -1,0 +1,7 @@
+# Raspberry Pi runtime dependencies
+numpy
+smbus2
+Flask
+# Optional offline landmark speech recognition:
+# vosk
+# pyaudio

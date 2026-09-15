@@ -308,7 +308,7 @@ def mapping_loop():
     """
 
     # Read all three ultrasonic sensors
-    left, center, right = sensor_manager.read_all()
+    left, center, right = read_all_sensors()
 
     # ---------------- Occupancy Grid Mapping ----------------
     grid.update(left, center, right)
@@ -363,9 +363,9 @@ def mapping_loop():
 
 def _plan_route(goal_x, goal_y):
     """
-    Plan A* path and convert it into spoken navigation instructions.
+    Plan A* path and convert it into simple navigation instructions.
     Returns:
-        path, speech_steps
+    path, speech_steps
     """
 
     start = (grid.pos_x, grid.pos_y)
@@ -373,14 +373,20 @@ def _plan_route(goal_x, goal_y):
 
     print(f"[A*] Planning from {start} to {goal}")
 
-    # Run A*
     path = astar(grid.grid, start, goal)
 
     if path is None or len(path) < 2:
         return None, None
 
     speech_steps = []
-    current_heading = grid.heading
+    current_heading = float(grid.heading)
+
+    direction = {
+        (1, 0): 90,     # right/east
+        (-1, 0): 270,   # left/west
+        (0, -1): 0,     # forward/north
+        (0, 1): 180     # backward/south
+    }
 
     for i in range(1, len(path)):
         x1, y1 = path[i - 1]
@@ -389,21 +395,13 @@ def _plan_route(goal_x, goal_y):
         dx = x2 - x1
         dy = y2 - y1
 
-        # Direction of next cell
-        if dx == 1:
-            target_heading = 90      # East
-        elif dx == -1:
-            target_heading = 270     # West
-        elif dy == -1:
-            target_heading = 0       # North
-        elif dy == 1:
-            target_heading = 180     # South
-        else:
+        if (dx, dy) not in direction:
             continue
+
+        target_heading = direction[(dx, dy)]
 
         diff = (target_heading - current_heading) % 360
 
-        # Turn first
         if diff == 90:
             speech_steps.append("Turn right.")
         elif diff == 270:
@@ -411,15 +409,16 @@ def _plan_route(goal_x, goal_y):
         elif diff == 180:
             speech_steps.append("Turn around.")
 
-        # Then walk one grid cell
+    # Every A* cell represents one forward movement.
         speech_steps.append("Walk forward one step.")
 
         current_heading = target_heading
 
-    print(f"[A*] Path length = {len(path)}")
-    print(f"[A*] Instructions = {len(speech_steps)}")
+    print(f"[A*] Path cells = {len(path)}")
+    print(f"[A*] Speech instructions = {len(speech_steps)}")
 
     return path, speech_steps
+
 
 def _predict_confidence(errors, walk_steps, complexity, dynamic_obstacles):
     """Feed recent session history + this session into the confidence model.
@@ -449,45 +448,66 @@ def _predict_confidence(errors, walk_steps, complexity, dynamic_obstacles):
 def navigation_loop(source_name, destination_name):
     """
     Navigate from a selected source landmark to a destination landmark
-    using A* + Ultrasonic SLAM.
+    using A* + ultrasonic safety sensing.
+
+    Navigation pose is controlled by the planned A* route.
+    Ultrasonic sensors are used for real-time obstacle detection.
     """
 
     start_time = datetime.now().isoformat()
 
     # ==========================================================
-    # Load SOURCE landmark (current position)
+    # Load SOURCE landmark
     # ==========================================================
     source_row = get_landmark(source_name)
+
     if source_row is None:
         speak("Source location not found.")
         return
 
     sx, sy, sheading, sconf, sscan, smap = source_row
 
-    # Restore SLAM map from source landmark
-    grid.from_dict(json.loads(smap))
+    # Restore map and pose from source landmark
+    try:
+        grid.from_dict(json.loads(smap))
+    except Exception as e:
+        print(f"[NAV] Failed to restore map: {e}")
+        speak("Unable to load source map.")
+        return
+
     grid.pos_x = sx
     grid.pos_y = sy
     grid.heading = sheading
     grid.pose_confidence = sconf
 
     # ==========================================================
-    # Load DESTINATION landmark (goal)
+    # Load DESTINATION landmark
     # ==========================================================
     dest_row = get_landmark(destination_name)
+
     if dest_row is None:
         speak("Destination not found.")
         return
 
     goal_x, goal_y, goal_heading, goal_conf, goal_scan, goal_map = dest_row
 
-    print(f"[START] ({grid.pos_x}, {grid.pos_y}) Heading={grid.heading}")
-    print(f"[GOAL] ({goal_x}, {goal_y}) Heading={goal_heading}")
+    print(
+        f"[START] ({grid.pos_x}, {grid.pos_y}) "
+        f"Heading={grid.heading}"
+    )
+
+    print(
+        f"[GOAL] ({goal_x}, {goal_y}) "
+        f"Heading={goal_heading}"
+    )
 
     # ==========================================================
-    # A* Route Planning
+    # A* ROUTE PLANNING
     # ==========================================================
-    instructions, speech_steps = _plan_route(goal_x, goal_y)
+    instructions, speech_steps = _plan_route(
+        goal_x,
+        goal_y
+    )
 
     if instructions is None or speech_steps is None:
         speak("No route found.")
@@ -496,67 +516,105 @@ def navigation_loop(source_name, destination_name):
     print(f"[A*] Path cells = {len(instructions)}")
     print(f"[A*] Speech instructions = {len(speech_steps)}")
 
-    walk_steps, turns, complexity = route_metrics(instructions)
+    # ==========================================================
+    # ROUTE METRICS
+    # ==========================================================
+    walk_steps = sum(
+        1
+        for step in speech_steps
+        if step == "Walk forward one step."
+    )
+
+    turns = sum(
+        1
+        for step in speech_steps
+        if step.startswith("Turn")
+    )
+
+    complexity = round(
+        turns * 0.5 + walk_steps / 20.0,
+        2
+    )
 
     # ==========================================================
-    # Navigation Metrics
+    # NAVIGATION METRICS
     # ==========================================================
     dynamic_obstacles = 0
     errors = 0
+
     waiting_dynamic = False
     stop_since = None
 
     step_idx = 0
 
     # ==========================================================
-    # Execute Route
+    # EXECUTE ROUTE
     # ==========================================================
     while step_idx < len(speech_steps):
 
         current_step = speech_steps[step_idx]
+
+        print(
+            f"[NAV] Step {step_idx + 1}/"
+            f"{len(speech_steps)}: {current_step}"
+        )
+
         speak(current_step)
 
         finished = False
 
         while not finished:
 
+            # --------------------------------------------------
             # Read ultrasonic sensors
+            # --------------------------------------------------
             left, center, right = read_all_sensors()
 
-            # Update occupancy grid
-            grid.update(left, center, right)
-
-            # Ultrasonic SLAM update
-            grid.update_slam(left, center, right)
-
-            # Loop closure (recognize saved landmarks)
-            matched = grid.loop_closure()
-            if matched:
-                speak_once(f"{matched} recognized.")
-                print(f"[SLAM] Loop closure at {matched}")
-
-            # Discovery-mode obstacle avoidance
-            action, message = get_nav_instruction(left, center, right)
+            print(
+                f"[SENSORS] "
+                f"L={left} cm "
+                f"C={center} cm "
+                f"R={right} cm"
+            )
 
             # --------------------------------------------------
-            # Dynamic obstacle detected
+            # Update occupancy grid ONLY
+            #
+            # Do NOT call update_slam() here.
+            # Do NOT call loop_closure() here.
+            #
+            # Navigation pose is controlled by the A* route.
             # --------------------------------------------------
+            
+
+            # --------------------------------------------------
+            # Real-time ultrasonic safety
+            # --------------------------------------------------
+            action, message = get_nav_instruction(
+                left,
+                center,
+                right
+            )
+
+            # ==================================================
+            # MOVING OBSTACLE
+            # ==================================================
             if action == "MOVING_CENTER":
 
                 if not waiting_dynamic:
                     dynamic_obstacles += 1
                     waiting_dynamic = True
 
+                    print(
+                        "[NAV] Dynamic obstacle detected."
+                    )
+
                 speak_once(message)
 
-            # --------------------------------------------------
-            # Stop / blocked path
-            # --------------------------------------------------
+            # ==================================================
+            # STOP / BLOCKED PATH
+            # ==================================================
             elif action in ("STOP", "PATH_BLOCKED"):
-
-                if waiting_dynamic:
-                    speak_once("Path clear. Continuing.")
-                    waiting_dynamic = False
 
                 if stop_since is None:
                     stop_since = time.time()
@@ -564,64 +622,143 @@ def navigation_loop(source_name, destination_name):
 
                 speak_once(message)
 
-                # Replan after waiting
+                print(
+                    f"[NAV] Path blocked. "
+                    f"Waiting {STOP_REPLAN_SECS}s before replanning."
+                )
+
+                # ------------------------------------------------
+                # Replan after obstacle remains for too long
+                # ------------------------------------------------
                 if time.time() - stop_since > STOP_REPLAN_SECS:
 
                     speak("Replanning route.")
 
-                    instructions, speech_steps = _plan_route(goal_x, goal_y)
+                    print(
+                        f"[A*] Replanning from "
+                        f"({grid.pos_x}, {grid.pos_y}) "
+                        f"to ({goal_x}, {goal_y})"
+                    )
 
-                    if instructions is None:
+                    new_instructions, new_speech_steps = _plan_route(
+                        goal_x,
+                        goal_y
+                    )
+
+                    if (
+                        new_instructions is None
+                        or new_speech_steps is None
+                    ):
                         speak("No alternate route found.")
+
                         stop_since = time.time()
 
                     else:
-                        walk_steps, turns, complexity = route_metrics(instructions)
+                        # ----------------------------------------
+                        # Replace current route
+                        # ----------------------------------------
+                        instructions = new_instructions
+                        speech_steps = new_speech_steps
+
+                        # Recalculate metrics
+                        walk_steps = sum(
+                            1
+                            for step in speech_steps
+                            if step == "Walk forward one step."
+                        )
+
+                        turns = sum(
+                            1
+                            for step in speech_steps
+                            if step.startswith("Turn")
+                        )
+
+                        complexity = round(
+                            turns * 0.5 + walk_steps / 20.0,
+                            2
+                        )
+
+                        # Start the new route from the beginning
                         step_idx = -1
+
                         stop_since = None
+                        waiting_dynamic = False
+
+                        print(
+                            "[NAV] New route accepted."
+                        )
+
                         finished = True
 
-            # --------------------------------------------------
-            # Safe to continue walking
-            # --------------------------------------------------
+            # ==================================================
+            # PATH CLEAR / SAFE
+            # ==================================================
             else:
 
                 if waiting_dynamic:
-                    speak_once("Path clear. Continuing.")
+
+                    speak_once(
+                        "Path clear. Continuing."
+                    )
+
                     waiting_dynamic = False
 
                 stop_since = None
 
-                # Discovery warning
-                pass
-                # ==============================================
-                # Ultrasonic SLAM Pose Update
-                # ==============================================
+                # ==================================================
+                # UPDATE NAVIGATION POSE
+                #
+                # Only update the pose AFTER the ultrasonic
+                # safety check says it is safe to continue.
+                # ==================================================
 
-                # ---------- Update SLAM pose ----------
                 step = current_step.lower()
 
                 if "turn around" in step:
+
                     grid.turn(180)
-                    print(f"[SLAM] Heading -> {grid.heading}")
+
+                    print(
+                        f"[NAV] Turn around -> "
+                        f"Heading={grid.heading}"
+                    )
 
                 elif "turn left" in step:
+
                     grid.turn(-90)
-                    print(f"[SLAM] Heading -> {grid.heading}")
+
+                    print(
+                        f"[NAV] Turn left -> "
+                        f"Heading={grid.heading}"
+                    )
 
                 elif "turn right" in step:
+
                     grid.turn(90)
-                    print(f"[SLAM] Heading -> {grid.heading}")
+
+                    print(
+                        f"[NAV] Turn right -> "
+                        f"Heading={grid.heading}"
+                    )
 
                 elif "walk" in step:
-                    grid.advance_steps(1)
-                    print(f"[SLAM] Walk -> ({grid.pos_x}, {grid.pos_y})")
 
-                print(f"[POSE] X={grid.pos_x}, Y={grid.pos_y}, Heading={grid.heading:.0f}°")
+                    old_x = grid.pos_x
+                    old_y = grid.pos_y
+
+                    grid.advance_steps(1)
+
+                    print(
+                        f"[NAV] Walk -> "
+                        f"({old_x}, {old_y}) "
+                        f"to "
+                        f"({grid.pos_x}, {grid.pos_y})"
+                    )
 
                 print(
-                    f"[POSE] X={grid.pos_x} "
-                    f"Y={grid.pos_y} "
+                    f"[POSE] "
+                    f"X={grid.pos_x}, "
+                    f"Y={grid.pos_y}, "
                     f"Heading={grid.heading:.0f}°"
                 )
 
@@ -629,44 +766,99 @@ def navigation_loop(source_name, destination_name):
 
             time.sleep(0.05)
 
+        # Move to next instruction
         step_idx += 1
 
     # ==========================================================
-    # Destination reached
+    # VERIFY DESTINATION
     # ==========================================================
-    speak("Destination reached.")
+    current_pose = (
+        grid.pos_x,
+        grid.pos_y
+    )
+
+    goal_pose = (
+        goal_x,
+        goal_y
+    )
 
     print(
-        f"[SLAM] Final pose = "
-        f"({grid.pos_x}, {grid.pos_y}) "
+        f"[NAV] Final pose = {current_pose} "
+        f"Goal = {goal_pose} "
         f"Heading={grid.heading}"
     )
 
     # ==========================================================
-    # Confidence Logging
+    # DESTINATION CONFIRMED
+    # ==========================================================
+    if current_pose == goal_pose:
+
+        speak("Destination reached.")
+
+        print(
+            "[NAV] Destination confirmed."
+        )
+
+        success = True
+
+    # ==========================================================
+    # DESTINATION NOT CONFIRMED
+    # ==========================================================
+    else:
+
+        print(
+            f"[NAV] Destination NOT confirmed. "
+            f"Current={current_pose}, "
+            f"Goal={goal_pose}"
+        )
+
+        speak(
+            "Route completed. "
+            "Destination not confirmed."
+        )
+
+        success = False
+
+    # ==========================================================
+    # CONFIDENCE CALCULATION
     # ==========================================================
     confidence = _predict_confidence(
         errors,
         walk_steps,
         complexity,
-        dynamic_obstacles,
+        dynamic_obstacles
     )
 
+    # ==========================================================
+    # LOG NAVIGATION SESSION
+    # ==========================================================
     confidence = log_session(
         start_time=start_time,
         destination=destination_name,
         steps=walk_steps,
         errors=errors,
-        success=True,
+        success=success,
         route_complexity=complexity,
         route_steps=walk_steps,
         turns=turns,
         dynamic_obstacles=dynamic_obstacles,
         level=level_for_confidence(confidence),
-        confidence=confidence,
+        confidence=confidence
     )
 
-    speak(f"Confidence score {int(confidence * 100)} percent.")
+    # ==========================================================
+    # FINAL CONFIDENCE ANNOUNCEMENT
+    # ==========================================================
+    speak(
+        f"Confidence score "
+        f"{int(confidence * 100)} percent."
+    )
+
+    print(
+        f"[NAV] Navigation complete. "
+        f"Success={success}, "
+        f"Confidence={confidence:.2f}"
+    )
 # -------------------------------------------------------
 # Destination Selection
 # -------------------------------------------------------

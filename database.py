@@ -60,29 +60,29 @@ def init_db():
 def save_landmark(name, grid_x, grid_y, grid_obj):
     name = name.lower().strip()
 
-    conn = _conn()
+    scan = getattr(grid_obj, "last_scan", None)
+    if scan and len(scan) == 3:
+        scan_signature = {"left": float(scan[0]), "center": float(scan[1]), "right": float(scan[2])}
+    else:
+        scan_signature = {"left": 0.0, "center": 0.0, "right": 0.0}
 
+    conn = _conn()
     conn.execute("""
         INSERT OR REPLACE INTO landmarks
         (name, grid_x, grid_y, heading, pose_confidence,
          scan_signature, map_data, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     """, (
-        name,
-        grid_x,
-        grid_y,
+        name, grid_x, grid_y,
         float(grid_obj.heading),
         float(getattr(grid_obj, "pose_confidence", 1.0)),
-        json.dumps(getattr(grid_obj, "scan_signature", [])),
+        json.dumps(scan_signature),
         json.dumps(grid_obj.to_dict()),
         datetime.now().isoformat()
     ))
-
     conn.commit()
     conn.close()
-
     print(f"[DB] Saved '{name}' ({grid_x},{grid_y}) Heading={grid_obj.heading}")
-
 def get_landmark(name):
     conn = _conn()
 

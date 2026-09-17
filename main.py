@@ -80,7 +80,8 @@ last_press_time = {
     BTN_NAVIGATE: 0
 }
 
-DEBOUNCE_TIME = 0.35   # seconds
+DEBOUNCE_TIME = 0.35 
+STOP_DIST = 30  # seconds
 # -------------------------------------------------------
 # Speak without repeating continuously
 # -------------------------------------------------------
@@ -559,8 +560,6 @@ def navigation_loop(source_name, destination_name):
             f"{len(speech_steps)}: {current_step}"
         )
 
-        speak(current_step)
-
         finished = False
 
         while not finished:
@@ -590,6 +589,7 @@ def navigation_loop(source_name, destination_name):
             # --------------------------------------------------
             # Real-time ultrasonic safety
             # --------------------------------------------------
+            grid.update(left,center,right)
             action, message = get_nav_instruction(
                 left,
                 center,
@@ -694,7 +694,13 @@ def navigation_loop(source_name, destination_name):
             # PATH CLEAR / SAFE
             # ==================================================
             else:
+                if "walk" in current_step.lower() and center < STOP_DIST:
+                    speak_once("Stop. Obstacle ahead.")
+                    finished = False
+                    time.sleep(0.05)
+                    continue
 
+                speak(current_step)
                 if waiting_dynamic:
 
                     speak_once(
